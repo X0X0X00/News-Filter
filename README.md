@@ -95,6 +95,8 @@ python src/llm/embedding_classifier.py \
 
 ## Project Structure
 
+> **`package/`** is the final production-ready delivery code — a self-contained, deployable classification service. Everything else (`src/`, `scripts/`, `data/`) is the R&D process: experiments, evaluations, and training pipelines.
+
 ```
 ├── api/                         # API server
 │   ├── api_server.py            # Entry point
@@ -116,7 +118,7 @@ python src/llm/embedding_classifier.py \
 │   ├── visualize_categories.py  # Category visualization
 │   ├── evaluate.py              # Evaluation script
 │   └── sampling.py              # Data sampling
-├── package/                     # Deployment package
+├── package/                     # ** Production-ready delivery code **
 │   ├── api_server.py
 │   ├── src/llm/
 │   └── models/
