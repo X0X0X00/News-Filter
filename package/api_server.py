@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-网页分类 HTTP API 服务
+Webpage Classification HTTP API Server
 
-启动:
+Usage:
     python api_server.py
     python api_server.py --port 8000
 
-请求示例:
+Request example:
     curl -X POST http://localhost:8000/classify \
         -H "Content-Type: application/json" \
-        -d '{"articleLink": "https://example.com/news", "title": "央行宣布降息", "text": "中国人民银行宣布..."}'
+        -d '{"title": "央行宣布降息", "text": "中国人民银行宣布...", "articleLink": "https://example.com"}'
 
-返回示例:
+Response example:
     {
         "top2": [
             {"label": "经济", "score": 0.87},
@@ -21,21 +21,40 @@
 """
 
 import sys
-import json
+import logging
 import argparse
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional
+import uvicorn
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-# 全局分类器实例（启动时加载）
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Max request body size (1MB)
+MAX_BODY_SIZE = 1 * 1024 * 1024
+# Max text field length (50k chars)
+MAX_TEXT_LENGTH = 50000
+
+# Global classifier instance
 classifier = None
 
 
 def load_model(matrix_path: str = None, model_path: str = None):
-    """加载嵌入模型和类别矩阵"""
+    """Load embedding model and category matrix."""
     from src.llm.embedding_classifier import QwenEmbeddingClassifier
 
     if matrix_path is None:
@@ -48,86 +67,103 @@ def load_model(matrix_path: str = None, model_path: str = None):
     return clf
 
 
-class ClassifyHandler(BaseHTTPRequestHandler):
-    """HTTP 请求处理器"""
+# Request/Response models
+class ClassifyRequest(BaseModel):
+    articleLink: Optional[str] = Field(default="", max_length=2048)
+    title: Optional[str] = Field(default="", max_length=MAX_TEXT_LENGTH)
+    text: Optional[str] = Field(default="", max_length=MAX_TEXT_LENGTH)
 
-    def _send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
-    def do_POST(self):
-        if self.path != "/classify":
-            self._send_json({"error": "Not found. Use POST /classify"}, 404)
-            return
+class CategoryScore(BaseModel):
+    label: str
+    score: float
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._send_json({"error": "Empty request body"}, 400)
-            return
 
-        body = self.rfile.read(content_length)
-        try:
-            req = json.loads(body)
-        except json.JSONDecodeError:
-            self._send_json({"error": "Invalid JSON"}, 400)
-            return
+class ClassifyResponse(BaseModel):
+    top2: list[CategoryScore]
 
-        title = req.get("title", "")
-        text = req.get("text", "")
-        article_link = req.get("articleLink", "")
 
-        if not title and not text:
-            self._send_json({"error": "At least one of 'title' or 'text' is required"}, 400)
-            return
+# Lifespan: load model on startup
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global classifier
+    logger.info("Loading model...")
+    classifier = load_model(
+        matrix_path=app.state.matrix_path,
+        model_path=app.state.model_path,
+    )
+    logger.info("Model loaded.")
+    yield
+    logger.info("Shutting down.")
 
-        # 分类
+
+app = FastAPI(title="Webpage Classifier API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    """Reject requests with body larger than MAX_BODY_SIZE."""
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_BODY_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"Request body too large. Max {MAX_BODY_SIZE} bytes."},
+        )
+    return await call_next(request)
+
+
+@app.post("/classify", response_model=ClassifyResponse)
+async def classify(req: ClassifyRequest):
+    title = req.title or ""
+    text = req.text or ""
+    article_link = req.articleLink or ""
+
+    if not title and not text:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'title' or 'text' is required.",
+        )
+
+    try:
         result = classifier.classify(title=title, url=article_link, content=text)
+    except Exception as e:
+        logger.error(f"Classification failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Classification failed.")
 
-        # 取 top 2
-        sorted_scores = sorted(result.scores.items(), key=lambda x: -x[1])
-        top2 = [{"label": label, "score": round(score, 4)} for label, score in sorted_scores[:2]]
+    sorted_scores = sorted(result.scores.items(), key=lambda x: -x[1])
+    top2 = [CategoryScore(label=label, score=round(score, 4)) for label, score in sorted_scores[:2]]
 
-        self._send_json({"top2": top2})
+    return ClassifyResponse(top2=top2)
 
-    def do_GET(self):
-        if self.path == "/health":
-            self._send_json({"status": "ok"})
-        else:
-            self._send_json({"error": "Use POST /classify or GET /health"}, 404)
 
-    def log_message(self, format, *args):
-        print(f"[{self.log_date_time_string()}] {args[0]}")
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="网页分类 API 服务")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="监听端口 (默认: 8000)")
-    parser.add_argument("--matrix", help="类别嵌入矩阵路径 (默认: models/hard_negative_train6000.pt)")
-    parser.add_argument("--model", help="嵌入模型路径 (默认: models/Qwen3-VL-Embedding-8B)")
+    parser = argparse.ArgumentParser(description="Webpage Classification API Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Listen address (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Listen port (default: 8000)")
+    parser.add_argument("--matrix", help="Category embedding matrix path")
+    parser.add_argument("--model", help="Embedding model path")
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes (default: 1)")
     args = parser.parse_args()
 
-    global classifier
-    print("正在加载模型...")
-    classifier = load_model(matrix_path=args.matrix, model_path=args.model)
-    print("模型加载完成!")
+    app.state.matrix_path = args.matrix
+    app.state.model_path = args.model
 
-    server = HTTPServer((args.host, args.port), ClassifyHandler)
-    print(f"\nAPI 服务已启动: http://{args.host}:{args.port}")
-    print(f"  POST /classify  - 分类接口")
-    print(f"  GET  /health    - 健康检查")
-    print(f"\n示例:")
-    print(f'  curl -X POST http://localhost:{args.port}/classify \\')
-    print(f'    -H "Content-Type: application/json" \\')
-    print(f'    -d \'{{"title": "央行宣布降息", "text": "中国人民银行宣布...", "articleLink": "https://example.com"}}\'')
+    logger.info(f"Starting server on {args.host}:{args.port}")
+    logger.info(f"  POST /classify  - Classification endpoint")
+    logger.info(f"  GET  /health    - Health check")
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n服务已停止")
-        server.server_close()
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":

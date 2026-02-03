@@ -125,7 +125,7 @@ def sample_frames(frames: List[Union[str, Image.Image]], num_segments: int, max_
     for frame_idx in frame_id_list:
         try:
             sampled_frames.append(frames[frame_idx])
-        except:
+        except (IndexError, KeyError):
             break
     # Ensure the sampled list meets the required segment count
     while len(sampled_frames) < num_segments:
@@ -314,7 +314,7 @@ class Qwen3VLEmbedder():
         return hidden_state[row, col]
 
     # Process inputs to generate normalized embeddings
-    def process(self, inputs: List[Dict[str, Any]], normalize: bool = True) -> tuple:
+    def process(self, inputs: List[Dict[str, Any]], normalize: bool = True) -> torch.Tensor:
         conversations = [self.format_model_input(
             text=ele.get('text'),
             image=ele.get('image'),

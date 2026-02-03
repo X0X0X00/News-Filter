@@ -13,16 +13,21 @@ import time
 import json
 import re
 import sys
+import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 class TeeLogger:
-    """同时输出到终端和文件"""
+    """同时输出到终端和文件，支持 context manager"""
     def __init__(self, filename, mode='w'):
         self.terminal = sys.stdout
+        self._log_path = filename
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
         self.log = open(filename, mode, encoding='utf-8')
 
     def write(self, message):
@@ -35,7 +40,18 @@ class TeeLogger:
         self.log.flush()
 
     def close(self):
-        self.log.close()
+        if not self.log.closed:
+            self.log.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        self.close()
 
 
 @dataclass
@@ -48,7 +64,10 @@ class EmbeddingClassifyResult:
 
 
 # 8 类分类体系
-LABELS = ["时政", "经济", "军事", "社会", "科技", "体育", "娱乐", "其他"]  
+LABELS = ["时政", "经济", "军事", "社会", "科技", "体育", "娱乐", "其他"]
+
+# Softmax temperature for confidence scoring (higher = sharper distribution)
+DEFAULT_TEMPERATURE = 10.0
 
 
 # 各类别的描述模板
@@ -361,14 +380,17 @@ class QwenEmbeddingClassifier:
         Args:
             path: 模型路径，如 "category_matrix.pt"
         """
-        data = torch.load(path, map_location=self.device)
+        try:
+            data = torch.load(path, map_location=self.device)
+        except (FileNotFoundError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to load category matrix from {path}: {e}")
         self.category_matrix = data['category_matrix'].to(self.device)
         self.category_embeddings = {k: v.to(self.device) for k, v in data['category_embeddings'].items()}
         self.categories = data['categories']
         self._is_trained = data.get('is_trained', True)
-        print(f"类别嵌入已加载: {path}")
-        print(f"  类别数: {len(self.categories)}")
-        print(f"  向量维度: {self.category_matrix.shape[1]}")
+        logger.info(f"类别嵌入已加载: {path}")
+        logger.info(f"  类别数: {len(self.categories)}")
+        logger.info(f"  向量维度: {self.category_matrix.shape[1]}")
 
     def classify(
         self,
@@ -431,7 +453,7 @@ class QwenEmbeddingClassifier:
         # 将相似度转换为置信度 (0-1)
         # 使用 softmax 归一化
         score_values = torch.tensor(list(scores.values()))
-        confidences = F.softmax(score_values * 10, dim=0)  # 乘以温度系数
+        confidences = F.softmax(score_values * DEFAULT_TEMPERATURE, dim=0)
         # softmax 会把分数转换成概率（加起来=1）                                              
         # 乘以 10 是温度系数，让差距更明显
         
@@ -534,7 +556,7 @@ class QwenEmbeddingClassifier:
             best_score = scores[best_label]
 
             score_values = torch.tensor(list(scores.values()))
-            confidences = F.softmax(score_values * 10, dim=0)  # 与单条分类保持一致
+            confidences = F.softmax(score_values * DEFAULT_TEMPERATURE, dim=0)
             confidence = confidences[list(scores.keys()).index(best_label)].item()
 
             # 实时输出相似度矩阵
@@ -575,7 +597,10 @@ def load_labeled_data(file_path: str) -> List[Dict]:
 
     if first_char == '[':
         # JSON 数组格式
-        return json.loads(content)
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON array in {file_path}: {e}")
     elif first_char == '{':
         # 多行 JSON 对象格式 - 使用正则匹配
         # 匹配 {"id": xxx ... } 格式的对象
@@ -594,7 +619,15 @@ def load_labeled_data(file_path: str) -> List[Dict]:
         return objects
     else:
         # 标准 JSONL 格式
-        return [json.loads(line) for line in content.split('\n') if line.strip()]
+        objects = []
+        for i, line in enumerate(content.split('\n')):
+            if not line.strip():
+                continue
+            try:
+                objects.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning(f"Skipping malformed JSONL line {i+1} in {file_path}")
+        return objects
 
 
 def create_classifier(
@@ -614,7 +647,7 @@ def create_classifier(
         QwenEmbeddingClassifier: 分类器实例
     """
     if model_path is None:
-        model_path = "/home/zzh/webpage-classification/models/Qwen3-VL-Embedding-8B"
+        model_path = str(Path(__file__).parent.parent.parent / "models" / "Qwen3-VL-Embedding-8B")
 
     return QwenEmbeddingClassifier(
         model_path=model_path,
@@ -629,7 +662,7 @@ def train_and_evaluate(
     test_count: int = 200,
     model_path: str = None,
     save_path: str = None,
-):
+) -> Tuple[float, List[Dict]]:
     """
     训练并评估嵌入分类器
 
@@ -768,7 +801,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="网页分类器 - 训练与评估")
-    parser.add_argument("--data", default="/home/zzh/webpage-classification/data/labeled/labeled.jsonl",
+    parser.add_argument("--data", default=str(Path(__file__).parent.parent.parent / "data" / "labeled" / "labeled.jsonl"),
                        help="标注数据路径")
     parser.add_argument("--train", type=int, default=500, help="训练样本数")
     parser.add_argument("--test", type=int, default=100, help="测试样本数")
@@ -837,23 +870,21 @@ if __name__ == "__main__":
         # 设置日志
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"data/results/embedding_train{args.train}_topk{args.top_k}_{args.doc_version}_test{args.test}_{timestamp}.log"
-        tee_logger = TeeLogger(log_filename)
-        sys.stdout = tee_logger
+        with TeeLogger(log_filename) as tee_logger:
+            sys.stdout = tee_logger
+            try:
+                from two_stage_classifier import train_and_evaluate as two_stage_train_and_evaluate
 
-        try:
-            from two_stage_classifier import train_and_evaluate as two_stage_train_and_evaluate
-
-            two_stage_train_and_evaluate(
-                data_path=args.data,
-                train_count=args.train,
-                test_count=args.test,
-                top_k=args.top_k,
-                save_path=args.save,
-                load_path=args.load,
-                doc_version=args.doc_version,
-                result_prefix="embedding",
-            )
-        finally:
-            sys.stdout = tee_logger.terminal
-            tee_logger.close()
-            print(f"\n日志已保存到: {log_filename}")
+                two_stage_train_and_evaluate(
+                    data_path=args.data,
+                    train_count=args.train,
+                    test_count=args.test,
+                    top_k=args.top_k,
+                    save_path=args.save,
+                    load_path=args.load,
+                    doc_version=args.doc_version,
+                    result_prefix="embedding",
+                )
+            finally:
+                sys.stdout = tee_logger.terminal
+        print(f"\n日志已保存到: {log_filename}")

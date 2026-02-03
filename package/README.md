@@ -26,13 +26,13 @@
 
 ```bash
 # 1. 安装依赖
-pip install torch transformers qwen-vl-utils numpy scikit-learn Pillow
+pip install -r requirements.txt
 
 # 2. 如果 models/Qwen3-VL-Embedding-8B/ 不存在，需要下载模型
 pip install huggingface_hub
 huggingface-cli download Qwen/Qwen3-VL-Embedding-8B --local-dir models/Qwen3-VL-Embedding-8B
 
-# 3. 启动服务
+# 3. 启动服务 (FastAPI + uvicorn)
 python api_server.py --port 8000
 ```
 
@@ -44,6 +44,7 @@ python api_server.py --port 8000
 | `--port` | 8000 | 监听端口 |
 | `--matrix` | models/hard_negative_train6000.pt | 类别嵌入矩阵路径 |
 | `--model` | models/Qwen3-VL-Embedding-8B | 嵌入模型路径 |
+| `--workers` | 1 | Worker 进程数 |
 
 ## 接口说明
 
