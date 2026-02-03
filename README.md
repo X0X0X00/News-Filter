@@ -59,7 +59,7 @@ huggingface-cli download Qwen/Qwen3-VL-Embedding-8B --local-dir models/Qwen3-VL-
 ### Run API Server
 
 ```bash
-python api_server.py --port 8000
+python api/api_server.py --port 8000
 ```
 
 ### API Usage
@@ -96,7 +96,10 @@ python src/llm/embedding_classifier.py \
 ## Project Structure
 
 ```
-├── api_server.py                # API server entry point
+├── api/                         # API server
+│   ├── api_server.py            # Entry point
+│   ├── test_api.sh              # Test script
+│   └── test_request.json        # Sample request
 ├── src/
 │   ├── llm/
 │   │   ├── embedding_classifier.py              # Core classifier
@@ -108,14 +111,18 @@ python src/llm/embedding_classifier.py \
 │   ├── preprocessing/           # Data cleaning
 │   ├── evaluation/              # Evaluation metrics
 │   └── utils/                   # Utilities
+├── scripts/                     # Utility scripts
+│   ├── run_classify.py          # Batch classification runner
+│   ├── visualize_categories.py  # Category visualization
+│   ├── evaluate.py              # Evaluation script
+│   └── sampling.py              # Data sampling
 ├── package/                     # Deployment package
 │   ├── api_server.py
 │   ├── src/llm/
 │   └── models/
 │       └── hard_negative_train6000.pt           # Pre-trained category embeddings (264KB)
 ├── configs/                     # Category config & multilingual keywords
-├── data/results/                # Experiment logs and evaluation results
-└── scripts/                     # Data sampling & evaluation scripts
+└── data/results/                # Experiment logs and evaluation results
 ```
 
 ## License
