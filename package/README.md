@@ -7,6 +7,7 @@
 ```
 .
 ├── api_server.py                   # API 服务入口
+├── Dockerfile                      # Docker 构建文件
 ├── requirements.txt                # Python 依赖
 ├── src/llm/
 │   ├── embedding_classifier.py     # 分类器
@@ -32,11 +33,23 @@ pip install -r requirements.txt
 pip install huggingface_hub
 huggingface-cli download Qwen/Qwen3-VL-Embedding-8B --local-dir models/Qwen3-VL-Embedding-8B
 
-# 3. 启动服务 (FastAPI + uvicorn)
+# 3. 启动服务
 python api_server.py --port 8000
 ```
 
-启动参数：
+### Docker 部署
+
+```bash
+# 构建镜像（不含模型文件）
+docker build -t webpage-classifier .
+
+# 运行（挂载模型目录）
+docker run --gpus all -p 8000:8000 \
+  -v /path/to/models:/app/models \
+  webpage-classifier
+```
+
+### 启动参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -45,10 +58,16 @@ python api_server.py --port 8000
 | `--matrix` | models/hard_negative_train6000.pt | 类别嵌入矩阵路径 |
 | `--model` | models/Qwen3-VL-Embedding-8B | 嵌入模型路径 |
 | `--workers` | 1 | Worker 进程数 |
+| `--cors-origins` | * | CORS 允许的源（逗号分隔） |
+| `--timeout` | 30 | 分类超时时间（秒） |
+
+也可通过环境变量配置：`WC_MATRIX_PATH`, `WC_MODEL_PATH`, `WC_CORS_ORIGINS`, `WC_CLASSIFY_TIMEOUT`
 
 ## 接口说明
 
 ### POST /classify
+
+单条分类。
 
 请求参数（JSON）：
 
@@ -60,36 +79,51 @@ python api_server.py --port 8000
 
 > `title` 和 `text` 至少提供一个。
 
-请求示例：
-
 ```bash
 curl -X POST http://localhost:8000/classify \
   -H "Content-Type: application/json" \
-  -d '{
-    "articleLink": "https://example.com/news/12345",
-    "title": "央行宣布降息",
-    "text": "中国人民银行今日宣布下调贷款市场报价利率..."
-  }'
+  -d '{"title": "央行宣布降息", "text": "中国人民银行今日宣布下调贷款市场报价利率..."}'
 ```
-
-返回示例：
 
 ```json
 {
   "top2": [
     {"label": "经济", "score": 0.8712},
     {"label": "时政", "score": 0.7134}
-  ]
+  ],
+  "latency_ms": 125.3
 }
+```
+
+### POST /batch_classify
+
+批量分类（最多 64 条）。
+
+```bash
+curl -X POST http://localhost:8000/batch_classify \
+  -H "Content-Type: application/json" \
+  -d '{"items": [{"title": "...", "text": "..."}, {"title": "...", "text": "..."}]}'
 ```
 
 ### GET /health
 
-健康检查接口。
+健康检查，返回模型和 GPU 状态。
 
-```bash
-curl http://localhost:8000/health
-# 返回: {"status": "ok"}
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "gpu_available": true,
+  "gpu_name": "NVIDIA A100",
+  "gpu_memory_used_mb": 15234,
+  "gpu_memory_total_mb": 81920
+}
+```
+
+### GET /version
+
+```json
+{"version": "1.1.0", "categories": ["时政", "经济", "军事", "社会", "科技", "体育", "娱乐", "其他"]}
 ```
 
 ## 分类类别
